@@ -3,10 +3,17 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { endpoints } from "../config";
 
+interface Document {
+  id: number;
+  title: string;
+  file: string;
+}
+
 interface Message {
   id: number;
   role: "user" | "assistant" | "system";
   content: string;
+  documents?: Document[];
 }
 
 interface Conversation {
@@ -28,6 +35,7 @@ export default function Chat() {
     number | null
   >(null);
   const [editTitle, setEditTitle] = useState("");
+  const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -84,6 +92,7 @@ export default function Chat() {
   const selectConversation = (conversation: Conversation) => {
     setCurrentConversationId(conversation.id);
     setMessages(conversation.messages || []);
+    setSelectedDocument(null);
   };
 
   const deleteConversation = async (e: React.MouseEvent, id: number) => {
@@ -218,7 +227,7 @@ export default function Chat() {
   return (
     <div className="flex h-full">
       {/* Sidebar for Conversations */}
-      <div className="w-64 border-r border-gray-200 bg-gray-50 flex flex-col">
+      <div className="w-64 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0">
         <div className="p-4 border-b border-gray-200">
           <button
             onClick={createNewConversation}
@@ -232,11 +241,10 @@ export default function Chat() {
             <div
               key={conv.id}
               onClick={() => selectConversation(conv)}
-              className={`w-full text-left px-4 py-3 text-sm hover:bg-gray-100 border-b border-gray-100 cursor-pointer flex justify-between items-center group ${
-                currentConversationId === conv.id
-                  ? "bg-gray-200 font-medium"
-                  : ""
-              }`}
+              className={`w-full text-left px-4 py-3 text-sm hover:bg-gray-100 border-b border-gray-100 cursor-pointer flex justify-between items-center group ${currentConversationId === conv.id
+                ? "bg-gray-200 font-medium"
+                : ""
+                }`}
             >
               {editingConversationId === conv.id ? (
                 <form
@@ -327,226 +335,333 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 flex flex-col bg-white h-full min-h-0">
-        {currentConversationId ? (
-          <>
-            {/* Header */}
-            <div className="h-16 border-b border-gray-200 flex items-center px-6 bg-white shrink-0">
-              <h2 className="text-lg font-medium truncate">
-                {conversations.find((c) => c.id === currentConversationId)
-                  ?.title || "Chat"}
-              </h2>
-            </div>
+      {/* Main Content Area: Chat + Preview */}
+      <div className="flex-1 flex flex-row min-w-0 bg-white h-full overflow-hidden">
+        {/* Chat Area */}
+        <div className="flex-1 flex flex-col h-full min-w-0">
+          {currentConversationId ? (
+            <>
+              {/* Header */}
+              <div className="h-16 border-b border-gray-200 flex items-center px-6 bg-white shrink-0">
+                <h2 className="text-lg font-medium truncate">
+                  {conversations.find((c) => c.id === currentConversationId)
+                    ?.title || "Chat"}
+                </h2>
+              </div>
 
-            {/* Messages */}
-            <div className="flex-1 p-6 overflow-y-auto">
-              <div className="max-w-3xl mx-auto space-y-6">
-                {messages.length === 0 && suggestions.length > 0 && (
-                  <div className="mt-10 mb-6">
-                    <p className="text-center text-gray-500 mb-6 text-sm font-medium">
-                      Suggested prompts based on your activity
-                    </p>
-                    <div className="grid grid-cols-1 gap-3 max-w-lg mx-auto">
-                      {suggestions.map((suggestion, index) => (
+              {/* Messages */}
+              <div className="flex-1 p-6 overflow-y-auto">
+                <div className="max-w-3xl mx-auto space-y-6">
+                  {messages.length === 0 && suggestions.length > 0 && (
+                    <div className="mt-10 mb-6">
+                      <p className="text-center text-gray-500 mb-6 text-sm font-medium">
+                        Suggested prompts based on your activity
+                      </p>
+                      <div className="grid grid-cols-1 gap-3 max-w-lg mx-auto">
+                        {suggestions.map((suggestion, index) => (
+                          <button
+                            key={index}
+                            onClick={() => sendMessage(undefined, suggestion)}
+                            className="p-3 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 hover:border-black text-left text-sm text-gray-700 transition-all shadow-sm group flex items-center justify-between"
+                          >
+                            <span>{suggestion}</span>
+                            <span className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400">
+                              →
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {messages.map((msg, index) => (
+                    <div
+                      key={index}
+                      className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                      <div
+                        className={`max-w-[80%] p-4 rounded-lg text-sm leading-relaxed text-left ${msg.role === "user"
+                          ? "bg-black text-white"
+                          : "bg-gray-100 text-black border border-gray-200"
+                          }`}
+                      >
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            ul: ({ node, ...props }) => (
+                              <ul
+                                className="list-disc list-inside my-2"
+                                {...props}
+                              />
+                            ),
+                            ol: ({ node, ...props }) => (
+                              <ol
+                                className="list-decimal list-inside my-2"
+                                {...props}
+                              />
+                            ),
+                            p: ({ node, ...props }) => (
+                              <p className="mb-2 last:mb-0" {...props} />
+                            ),
+                            a: ({ node, ...props }) => (
+                              <a
+                                className="text-blue-600 underline"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                {...props}
+                              />
+                            ),
+                            hr: ({ node, ...props }) => (
+                              <hr className="my-4 border-gray-300" {...props} />
+                            ),
+                            h1: ({ node, ...props }) => (
+                              <h1
+                                className="text-xl font-bold my-2"
+                                {...props}
+                              />
+                            ),
+                            h2: ({ node, ...props }) => (
+                              <h2
+                                className="text-lg font-bold my-2"
+                                {...props}
+                              />
+                            ),
+                            h3: ({ node, ...props }) => (
+                              <h3
+                                className="text-md font-bold my-2"
+                                {...props}
+                              />
+                            ),
+                            table: ({ node, ...props }) => (
+                              <div className="overflow-x-auto my-4">
+                                <table
+                                  className="min-w-full divide-y divide-gray-200 border border-gray-200"
+                                  {...props}
+                                />
+                              </div>
+                            ),
+                            thead: ({ node, ...props }) => (
+                              <thead className="bg-gray-50" {...props} />
+                            ),
+                            th: ({ node, ...props }) => (
+                              <th
+                                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-b border-gray-200"
+                                {...props}
+                              />
+                            ),
+                            tbody: ({ node, ...props }) => (
+                              <tbody
+                                className="bg-white divide-y divide-gray-200"
+                                {...props}
+                              />
+                            ),
+                            tr: ({ node, ...props }) => (
+                              <tr className="hover:bg-gray-50" {...props} />
+                            ),
+                            td: ({ node, ...props }) => (
+                              <td
+                                className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 border-b border-gray-200"
+                                {...props}
+                              />
+                            ),
+                            blockquote: ({ node, ...props }) => (
+                              <blockquote
+                                className="border-l-4 border-gray-300 pl-4 italic my-4 text-gray-600"
+                                {...props}
+                              />
+                            ),
+                            code: ({
+                              node,
+                              className,
+                              children,
+                              ...props
+                            }: any) => {
+                              const match = /language-(\w+)/.exec(
+                                className || "",
+                              );
+                              const isInline =
+                                !match && !className?.includes("language-");
+                              return isInline ? (
+                                <code
+                                  className="bg-gray-200 px-1 py-0.5 rounded text-sm font-mono text-red-500"
+                                  {...props}
+                                >
+                                  {children}
+                                </code>
+                              ) : (
+                                <div className="my-4 rounded-lg overflow-hidden bg-gray-900 text-white">
+                                  <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
+                                    <span className="text-xs text-gray-400">
+                                      {match?.[1] || "code"}
+                                    </span>
+                                  </div>
+                                  <div className="p-4 overflow-x-auto">
+                                    <code
+                                      className={`font-mono text-sm ${className || ""}`}
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  </div>
+                                </div>
+                              );
+                            },
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+
+                        {/* Document References */}
+                        {msg.documents && msg.documents.length > 0 && (
+                          <div className="mt-4 pt-3 border-t border-gray-200/50">
+                            <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
+                              Sources
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              {msg.documents.map((doc) => (
+                                <button
+                                  key={doc.id}
+                                  onClick={() => {
+                                    // Handle relative paths from Django (which start with /media)
+                                    // Use hardcoded backend URL for now as API_BASE_URL has /api suffix
+                                    const fileUrl = doc.file.startsWith("http")
+                                      ? doc.file
+                                      : `http://127.0.0.1:8000${doc.file}`;
+                                    setSelectedDocument(fileUrl);
+                                  }}
+                                  className="flex items-center gap-2 text-xs bg-white border border-gray-200 rounded-md px-2.5 py-1.5 text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-colors shadow-sm"
+                                  title="Click to preview"
+                                >
+                                  <span>📄</span>
+                                  <span className="font-medium underline truncate max-w-[150px]">
+                                    {doc.title}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="flex justify-start">
+                      <div className="bg-gray-100 text-black border border-gray-200 p-4 rounded-lg text-sm italic">
+                        Thinking...
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+
+              {/* Input */}
+              <div className="p-4 border-t border-gray-200 bg-white">
+                <div className="max-w-3xl mx-auto">
+                  {/* Suggestion Chips - Only show when chat is not empty */}
+                  {messages.length > 0 && suggestions.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {suggestions.slice(0, 3).map((suggestion, index) => (
                         <button
                           key={index}
                           onClick={() => sendMessage(undefined, suggestion)}
-                          className="p-3 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 hover:border-black text-left text-sm text-gray-700 transition-all shadow-sm group flex items-center justify-between"
+                          className="px-3 py-1 bg-gray-100 hover:bg-gray-200 border border-gray-200 rounded-full text-xs text-gray-700 transition-colors truncate max-w-50"
+                          title={suggestion}
                         >
-                          <span>{suggestion}</span>
-                          <span className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400">
-                            →
-                          </span>
+                          {suggestion}
                         </button>
                       ))}
                     </div>
-                  </div>
-                )}
-                {messages.map((msg, index) => (
-                  <div
-                    key={index}
-                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                  >
-                    <div
-                      className={`max-w-[80%] p-4 rounded-lg text-sm leading-relaxed text-left ${
-                        msg.role === "user"
-                          ? "bg-black text-white"
-                          : "bg-gray-100 text-black border border-gray-200"
-                      }`}
+                  )}
+                  <form onSubmit={sendMessage} className="flex gap-4">
+                    <input
+                      type="text"
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      placeholder="Type your message..."
+                      className="flex-1 p-3 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent text-sm"
+                      disabled={loading || !currentConversationId}
+                    />
+                    <button
+                      type="submit"
+                      disabled={loading || !currentConversationId}
+                      className="px-6 py-2 bg-black text-white font-medium hover:bg-gray-800 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
                     >
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          ul: ({ node, ...props }) => (
-                            <ul
-                              className="list-disc list-inside my-2"
-                              {...props}
-                            />
-                          ),
-                          ol: ({ node, ...props }) => (
-                            <ol
-                              className="list-decimal list-inside my-2"
-                              {...props}
-                            />
-                          ),
-                          p: ({ node, ...props }) => (
-                            <p className="mb-2 last:mb-0" {...props} />
-                          ),
-                          a: ({ node, ...props }) => (
-                            <a
-                              className="text-blue-600 underline"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              {...props}
-                            />
-                          ),
-                          hr: ({ node, ...props }) => (
-                            <hr className="my-4 border-gray-300" {...props} />
-                          ),
-                          h1: ({ node, ...props }) => (
-                            <h1 className="text-xl font-bold my-2" {...props} />
-                          ),
-                          h2: ({ node, ...props }) => (
-                            <h2 className="text-lg font-bold my-2" {...props} />
-                          ),
-                          h3: ({ node, ...props }) => (
-                            <h3 className="text-md font-bold my-2" {...props} />
-                          ),
-                          table: ({ node, ...props }) => (
-                            <div className="overflow-x-auto my-4">
-                              <table
-                                className="min-w-full divide-y divide-gray-200 border border-gray-200"
-                                {...props}
-                              />
-                            </div>
-                          ),
-                          thead: ({ node, ...props }) => (
-                            <thead className="bg-gray-50" {...props} />
-                          ),
-                          th: ({ node, ...props }) => (
-                            <th
-                              className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-b border-gray-200"
-                              {...props}
-                            />
-                          ),
-                          tbody: ({ node, ...props }) => (
-                            <tbody
-                              className="bg-white divide-y divide-gray-200"
-                              {...props}
-                            />
-                          ),
-                          tr: ({ node, ...props }) => (
-                            <tr className="hover:bg-gray-50" {...props} />
-                          ),
-                          td: ({ node, ...props }) => (
-                            <td
-                              className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 border-b border-gray-200"
-                              {...props}
-                            />
-                          ),
-                          blockquote: ({ node, ...props }) => (
-                            <blockquote
-                              className="border-l-4 border-gray-300 pl-4 italic my-4 text-gray-600"
-                              {...props}
-                            />
-                          ),
-                          code: ({
-                            node,
-                            className,
-                            children,
-                            ...props
-                          }: any) => {
-                            const match = /language-(\w+)/.exec(
-                              className || "",
-                            );
-                            const isInline =
-                              !match && !className?.includes("language-");
-                            return isInline ? (
-                              <code
-                                className="bg-gray-200 px-1 py-0.5 rounded text-sm font-mono text-red-500"
-                                {...props}
-                              >
-                                {children}
-                              </code>
-                            ) : (
-                              <div className="my-4 rounded-lg overflow-hidden bg-gray-900 text-white">
-                                <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
-                                  <span className="text-xs text-gray-400">
-                                    {match?.[1] || "code"}
-                                  </span>
-                                </div>
-                                <div className="p-4 overflow-x-auto">
-                                  <code
-                                    className={`font-mono text-sm ${className || ""}`}
-                                    {...props}
-                                  >
-                                    {children}
-                                  </code>
-                                </div>
-                              </div>
-                            );
-                          },
-                        }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                ))}
-                {loading && (
-                  <div className="flex justify-start">
-                    <div className="bg-gray-100 text-black border border-gray-200 p-4 rounded-lg text-sm italic">
-                      Thinking...
-                    </div>
-                  </div>
-                )}
-                <div ref={messagesEndRef} />
+                      Send
+                    </button>
+                  </form>
+                </div>
               </div>
+            </>
+          ) : (
+            <div className="flex-1 flex items-center justify-center flex-col text-gray-400">
+              <p className="text-lg font-medium mb-2">Welcome to Chatbot</p>
+              <p className="text-sm">
+                Select a conversation or start a new one.
+              </p>
             </div>
+          )}
+        </div>
 
-            {/* Input */}
-            <div className="p-4 border-t border-gray-200 bg-white">
-              <div className="max-w-3xl mx-auto">
-                {/* Suggestion Chips - Only show when chat is not empty */}
-                {messages.length > 0 && suggestions.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {suggestions.slice(0, 3).map((suggestion, index) => (
-                      <button
-                        key={index}
-                        onClick={() => sendMessage(undefined, suggestion)}
-                        className="px-3 py-1 bg-gray-100 hover:bg-gray-200 border border-gray-200 rounded-full text-xs text-gray-700 transition-colors truncate max-w-50"
-                        title={suggestion}
-                      >
-                        {suggestion}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <form onSubmit={sendMessage} className="flex gap-4">
-                  <input
-                    type="text"
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    placeholder="Type your message..."
-                    className="flex-1 p-3 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-black focus:border-transparent text-sm"
-                    disabled={loading || !currentConversationId}
-                  />
-                  <button
-                    type="submit"
-                    disabled={loading || !currentConversationId}
-                    className="px-6 py-2 bg-black text-white font-medium hover:bg-gray-800 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+        {/* Document Preview Panel */}
+        {selectedDocument && (
+          <div className="w-[45%] bg-white border-l border-gray-200 shadow-xl flex flex-col h-full animate-in slide-in-from-right-10 duration-300">
+            <div className="p-3 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+              <h3 className="font-medium text-sm text-gray-700">
+                Document Preview
+              </h3>
+              <div className="flex items-center gap-2">
+                <a
+                  href={selectedDocument}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-1.5 text-gray-500 hover:bg-gray-200 rounded"
+                  title="Open in new tab"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                   >
-                    Send
-                  </button>
-                </form>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                    <polyline points="15 3 21 3 21 9"></polyline>
+                    <line x1="10" y1="14" x2="21" y2="3"></line>
+                  </svg>
+                </a>
+                <button
+                  onClick={() => setSelectedDocument(null)}
+                  className="p-1.5 text-gray-500 hover:bg-gray-200 rounded"
+                  title="Close preview"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
               </div>
             </div>
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center flex-col text-gray-400">
-            <p className="text-lg font-medium mb-2">Welcome to Chatbot</p>
-            <p className="text-sm">Select a conversation or start a new one.</p>
+            <div className="flex-1 bg-gray-100 p-4">
+              <iframe
+                src={selectedDocument}
+                className="w-full h-full border border-gray-300 rounded shadow-sm bg-white"
+                title="Document Preview"
+              />
+            </div>
           </div>
         )}
       </div>

@@ -66,7 +66,35 @@ def process_document(document_id):
                 return False, "Unsupported file format"
 
         if not text.strip():
-            return False, "Empty document"
+            # Fallback: Try using Gemini to extract text (e.g. for scanned PDFs)
+            print(f"Basic extraction failed for {doc.title}. Trying Gemini extraction...")
+            try:
+                with open(file_path, "rb") as f:
+                    file_content = f.read()
+                
+                mime_type = "application/pdf"
+                if file_path.lower().endswith('.txt'): mime_type = "text/plain"
+                elif file_path.lower().endswith('.md'): mime_type = "text/markdown"
+                
+                client = get_client()
+                if client:
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[
+                            types.Content(
+                                parts=[
+                                    types.Part.from_bytes(data=file_content, mime_type=mime_type),
+                                    types.Part.from_text(text="Extract all text from this document for indexing. Return only the extracted text, no meta-commentary.")
+                                ]
+                            )
+                        ]
+                    )
+                    text = response.text
+            except Exception as e:
+                print(f"Gemini fallback failed: {e}")
+
+        if not text or not text.strip():
+            return False, "Empty document (could not extract text)"
 
         # Sanitize text: Remove null bytes which PostgreSQL cannot handle
         text = text.replace('\x00', '')
@@ -145,7 +173,7 @@ def generate_chat_response(message_history, user_query, user):
     """
     client = get_client()
     if not client:
-        return "Error: GOOGLE_API_KEY is missing."
+        return "Error: GOOGLE_API_KEY is missing.", []
 
     try:
         # 1. Search for relevant context
@@ -165,8 +193,12 @@ def generate_chat_response(message_history, user_query, user):
             "Do NOT refer to 'chunks' or 'sections' by their internal index; simply refer to the document title. "
             "If the Context does not contain the answer, you can answer from your general knowledge, "
             "but explicitly state that you couldn't find it in the uploaded documents. "
-            "Be concise and professional."
-            "If user says hi or hello greet them with 'Hello! How can I help you today?'."
+            "Be concise and professional. "
+            "If user says hi or hello greet them with 'Hello! How can I help you today?'.\n\n"
+            "CRITICAL INSTRUCTION: at the very end of your response, on a new line, you MUST list the exact titles of the documents from the Context that you actually used to answer the question. "
+            "Format the line exactly as: 'USED_SOURCES: title1, title2'. "
+            "If you didn't use any documents from the context, write 'USED_SOURCES: NONE'. "
+            "Do not include this line if you are just greeting."
         )
 
         # 3. Format Chat History for Gemini
@@ -211,7 +243,43 @@ def generate_chat_response(message_history, user_query, user):
             contents=contents
         )
         
-        return response.text
+        raw_text = response.text
+        
+        # Parse USED_SOURCES
+        final_text = raw_text
+        referenced_documents = []
+        
+        if "USED_SOURCES:" in raw_text:
+            parts = raw_text.rsplit("USED_SOURCES:", 1)
+            final_text = parts[0].strip()
+            sources_str = parts[1].strip()
+            
+            if sources_str != "NONE":
+                # Get all available docs from context
+                available_docs = {chunk.document.title: chunk.document for chunk in relevant_chunks}
+                
+                # Match titles
+                source_titles = [t.strip() for t in sources_str.split(',')]
+                for title in source_titles:
+                    # Simple fuzzy match or exact match
+                    # Trying exact match first since we told LLM to use exact titles
+                    if title in available_docs:
+                        referenced_documents.append(available_docs[title])
+                    else:
+                        # Fallback: check if title is contained in any available doc title
+                        for avail_title, doc in available_docs.items():
+                            if title.lower() in avail_title.lower():
+                                referenced_documents.append(doc)
+                                break
+            
+            # Remove duplicates
+            referenced_documents = list(set(referenced_documents))
+        else:
+            # Fallback for safe measure: if LLM ignored instruction, use old logic but maybe limit it?
+            # Or just return nothing to be strict. Let's return nothing to avoid "Sources" clutter.
+            referenced_documents = [] # list({chunk.document for chunk in relevant_chunks})
+
+        return final_text, referenced_documents
     except Exception as e:
         print(f"Error generating response: {e}")
-        return "I encountered an error while processing your request. Please try again later."
+        return "I encountered an error while processing your request. Please try again later.", []

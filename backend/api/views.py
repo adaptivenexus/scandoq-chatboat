@@ -112,13 +112,16 @@ class ConversationViewSet(viewsets.ModelViewSet):
             previous_history = previous_history[-10:]
         
         # Call RAG service
-        ai_response_content = generate_chat_response(previous_history, content, request.user)
+        ai_response_content, referenced_docs = generate_chat_response(previous_history, content, request.user)
         
         ai_message = Message.objects.create(
             conversation=conversation,
             role='assistant',
             content=ai_response_content
         )
+        
+        if referenced_docs:
+            ai_message.documents.set(referenced_docs)
 
         # Update conversation timestamp
         conversation.save()
