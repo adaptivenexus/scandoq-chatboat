@@ -30,11 +30,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
         return Conversation.objects.filter(user=self.request.user).order_by('-updated_at')
 
     def perform_create(self, serializer):
-        doc = serializer.save(user=self.request.user)
-        # Process document (split, embed, store)
-        # Note: For production, this should be a background task (e.g. Celery)
-        # For now, we run it synchronously to ensure immediate availability for testing
-        process_document(doc.id)
+        serializer.save(user=self.request.user)
 
     @action(detail=False, methods=['get'])
     def suggestions(self, request):

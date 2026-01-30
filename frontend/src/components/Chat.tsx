@@ -44,7 +44,9 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
+    if (messages.length > 0) {
+      scrollToBottom();
+    }
   }, [messages]);
 
   const scrollToBottom = () => {
@@ -507,11 +509,11 @@ export default function Chat() {
                             },
                           }}
                         >
-                          {msg.content}
+                          {typeof msg.content === 'string' ? msg.content : String(msg.content || '')}
                         </ReactMarkdown>
 
                         {/* Document References */}
-                        {msg.documents && msg.documents.length > 0 && (
+                        {Array.isArray(msg.documents) && msg.documents.length > 0 && (
                           <div className="mt-4 pt-3 border-t border-gray-200/50">
                             <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
                               Sources

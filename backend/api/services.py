@@ -1,13 +1,16 @@
 import os
+import shutil
+import lancedb
+import boto3
 from google import genai
 from google.genai import types
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from api.models import Document, DocumentChunk
-from pgvector.django import L2Distance
+from api.models import Document
+from django.conf import settings
+from botocore.config import Config
 
 # Configure Gemini
-# Ensure GOOGLE_API_KEY is in your environment variables
 def get_client():
     if os.getenv('GOOGLE_API_KEY'):
         return genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
@@ -16,7 +19,6 @@ def get_client():
 def get_embedding(text):
     """
     Generate embedding using Gemini model.
-    Using 'text-embedding-004' as it's the latest standard.
     """
     client = get_client()
     if not client:
@@ -36,67 +38,90 @@ def get_embedding(text):
         print(f"Error generating embedding: {e}")
         return None
 
+def get_vector_db():
+    """
+    Connect to LanceDB on S3.
+    """
+    bucket_name = os.getenv('AWS_STORAGE_BUCKET_NAME')
+    
+    if bucket_name:
+        # S3 Connection
+        # URI format: s3://bucket/path
+        uri = f"s3://{bucket_name}/vectors"
+        # LanceDB automatically picks up AWS credentials from env vars (AWS_ACCESS_KEY_ID etc)
+        # We don't need to manually pass boto3 session if env vars are set.
+        return lancedb.connect(uri)
+    else:
+        # Fallback to local
+        return lancedb.connect("./lancedb_data")
+
+def get_or_create_table(db, table_name="documents"):
+    """
+    Get or create the vector table.
+    """
+    try:
+        if table_name in db.table_names():
+            return db.open_table(table_name)
+        
+        # Define schema implicitly by adding first record or explicitly if needed.
+        # For simplicity, we'll let it infer or create empty if supported.
+        # LanceDB requires data to create a table usually, or a pyarrow schema.
+        # We will handle creation in process_document if it doesn't exist.
+        return None
+    except Exception as e:
+        print(f"Error getting table: {e}")
+        return None
+
 def process_document(document_id):
     """
-    Reads the document file, splits it into chunks, generates embeddings using Gemini,
-    and stores them in the DocumentChunk model.
+    Reads the document file, splits it into chunks, generates embeddings,
+    and stores them in S3 via LanceDB.
     """
     if not os.getenv('GOOGLE_API_KEY'):
-        print("GOOGLE_API_KEY not found. Skipping processing.")
         return False, "Missing API Key"
 
     try:
         doc = Document.objects.get(id=document_id)
-        file_path = doc.file.path
         
         # 1. Load Document content
+        # doc.file.open() handles S3 or local automatically thanks to django-storages
+        try:
+            doc.file.open('rb')
+            file_content = doc.file.read()
+            doc.file.close()
+        except Exception as e:
+            return False, f"Could not read file: {e}"
+
         text = ""
-        if file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
-            pages = loader.load()
-            text = "\n".join([p.page_content for p in pages])
-        elif file_path.lower().endswith('.txt') or file_path.lower().endswith('.md'):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-        else:
+        # Simple extraction based on extension
+        filename = doc.file.name.lower()
+        
+        if filename.endswith('.pdf'):
+            # For PDF, we might need a temp file for PyPDFLoader or use a stream parser
+            # PyPDFLoader usually requires a file path.
+            # We will save to a temp file.
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(file_content)
+                tmp_path = tmp.name
+            
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except Exception:
-                return False, "Unsupported file format"
+                loader = PyPDFLoader(tmp_path)
+                pages = loader.load()
+                text = "\n".join([p.page_content for p in pages])
+            finally:
+                os.unlink(tmp_path)
+                
+        else:
+            # Text/MD
+            try:
+                text = file_content.decode('utf-8')
+            except:
+                text = str(file_content)
 
         if not text.strip():
-            # Fallback: Try using Gemini to extract text (e.g. for scanned PDFs)
-            print(f"Basic extraction failed for {doc.title}. Trying Gemini extraction...")
-            try:
-                with open(file_path, "rb") as f:
-                    file_content = f.read()
-                
-                mime_type = "application/pdf"
-                if file_path.lower().endswith('.txt'): mime_type = "text/plain"
-                elif file_path.lower().endswith('.md'): mime_type = "text/markdown"
-                
-                client = get_client()
-                if client:
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=[
-                            types.Content(
-                                parts=[
-                                    types.Part.from_bytes(data=file_content, mime_type=mime_type),
-                                    types.Part.from_text(text="Extract all text from this document for indexing. Return only the extracted text, no meta-commentary.")
-                                ]
-                            )
-                        ]
-                    )
-                    text = response.text
-            except Exception as e:
-                print(f"Gemini fallback failed: {e}")
+             return False, "Empty document text"
 
-        if not text or not text.strip():
-            return False, "Empty document (could not extract text)"
-
-        # Sanitize text: Remove null bytes which PostgreSQL cannot handle
         text = text.replace('\x00', '')
 
         # 2. Split Text
@@ -107,39 +132,48 @@ def process_document(document_id):
         )
         chunks = text_splitter.split_text(text)
         
-        # 3. Generate Embeddings & Save
-        document_chunks = []
-        
-        # Gemini has rate limits, but for small docs it's fine. 
-        # For production, implement batching or retry logic.
+        # 3. Generate Embeddings & Prepare Data
+        data = []
         for i, chunk_text in enumerate(chunks):
             embedding = get_embedding(chunk_text)
             if embedding:
-                document_chunks.append(
-                    DocumentChunk(
-                        document=doc,
-                        chunk_index=i,
-                        content=chunk_text,
-                        embedding=embedding
-                    )
-                )
-            
-        DocumentChunk.objects.bulk_create(document_chunks)
+                data.append({
+                    "vector": embedding,
+                    "text": chunk_text,
+                    "document_id": doc.id,
+                    "chunk_index": i,
+                    "title": doc.title
+                })
         
+        if not data:
+             return False, "No embeddings generated"
+
+        # 4. Save to LanceDB (S3)
+        db = get_vector_db()
+        table_name = "documents"
+        
+        if table_name in db.table_names():
+            table = db.open_table(table_name)
+            table.add(data)
+        else:
+            # Create a table
+            db.create_table(table_name, data=data)
+
         # Update processed status
         doc.is_processed = True
         doc.save()
 
-        print(f"Successfully processed document {document_id}: {len(document_chunks)} chunks created.")
-        return True, len(document_chunks)
+        return True, len(data)
         
     except Exception as e:
         print(f"Error processing document {document_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False, str(e)
 
 def search_documents(query, user, limit=5):
     """
-    Search for relevant document chunks using vector similarity.
+    Search for relevant document chunks using LanceDB on S3.
     """
     client = get_client()
     if not client:
@@ -147,22 +181,45 @@ def search_documents(query, user, limit=5):
 
     try:
         # Generate embedding for the query
-        query_embedding_result = client.models.embed_content(
+        query_result = client.models.embed_content(
             model="text-embedding-004",
             contents=query,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_QUERY"
-            )
+            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
-        query_embedding = query_embedding_result.embeddings[0].values
+        query_embedding = query_result.embeddings[0].values
         
-        # Search in database using pgvector L2 distance
-        # Filter by documents owned by the user
-        chunks = DocumentChunk.objects.filter(document__user=user) \
-            .annotate(distance=L2Distance('embedding', query_embedding)) \
-            .order_by('distance')[:limit]
+        # Connect to DB
+        db = get_vector_db()
+        if "documents" not in db.table_names():
+            return []
             
-        return chunks
+        table = db.open_table("documents")
+        
+        # Get User's Document IDs first to filter in LanceDB
+        # LanceDB SQL filtering is powerful but let's be explicit
+        user_doc_ids = list(Document.objects.filter(user=user).values_list('id', flat=True))
+        
+        if not user_doc_ids:
+            return []
+            
+        # Search
+        # Filter syntax: "document_id IN (1, 2, 3)"
+        # Note: Large lists in SQL string might be slow, but fine for prototype.
+        id_list = ", ".join(map(str, user_doc_ids))
+        
+        results = table.search(query_embedding) \
+            .where(f"document_id IN ({id_list})") \
+            .limit(limit) \
+            .to_list()
+            
+        # Convert to object-like structure for compatibility with views
+        class ChunkResult:
+            def __init__(self, data):
+                self.content = data['text']
+                self.document = Document(id=data['document_id'], title=data['title'])
+                
+        return [ChunkResult(r) for r in results]
+
     except Exception as e:
         print(f"Error searching documents: {e}")
         return []
@@ -178,7 +235,6 @@ def generate_chat_response(message_history, user_query, user):
     try:
         # 1. Search for relevant context
         relevant_chunks = search_documents(user_query, user)
-        # Use select_related/prefetch_related if performance becomes an issue, but for now access property directly
         context_str = "\n\n".join([f"Document: {c.document.title}\n{c.content}" for c in relevant_chunks])
         
         if not context_str:
@@ -190,7 +246,6 @@ def generate_chat_response(message_history, user_query, user):
             "You have access to the user's uploaded documents via the Context provided below. "
             "Always prioritize the information in the Context when answering. "
             "If the Context contains the answer, cite the information using the Document Name provided in the header (e.g., '**Document: Filename.pdf**'). "
-            "Do NOT refer to 'chunks' or 'sections' by their internal index; simply refer to the document title. "
             "If the Context does not contain the answer, you can answer from your general knowledge, "
             "but explicitly state that you couldn't find it in the uploaded documents. "
             "Be concise and professional. "
@@ -201,15 +256,8 @@ def generate_chat_response(message_history, user_query, user):
             "Do not include this line if you are just greeting."
         )
 
-        # 3. Format Chat History for Gemini
-        # Convert Django Message objects or dicts to Gemini content format
-        # Expecting message_history to be a list of dicts: [{'role': 'user'|'assistant', 'content': '...'}]
+        # 3. Format Chat History
         contents = []
-        
-        # Add a system-like message at the start (Gemini supports system_instruction param in recent APIs, 
-        # but embedding it in the first turn or config is also common. 
-        # google-genai SDK 0.3+ has explicit config.
-        
         for msg in message_history:
             role = "user" if msg['role'] == "user" else "model"
             contents.append(types.Content(
@@ -217,7 +265,6 @@ def generate_chat_response(message_history, user_query, user):
                 parts=[types.Part.from_text(text=msg['content'])]
             ))
 
-        # Add the current query with context as the last user message
         final_prompt = f"Context:\n{context_str}\n\nUser Question: {user_query}"
         
         contents.append(types.Content(
@@ -225,17 +272,9 @@ def generate_chat_response(message_history, user_query, user):
             parts=[types.Part.from_text(text=final_prompt)]
         ))
         
-        # If the last message in history was the user query, replace it or append context to it.
-        # However, views.py usually saves the message first. 
-        # Let's assume message_history EXCLUDES the current new query, or we just append a new turn.
-        # Actually, simpler RAG pattern:
-        # System: Instructions
-        # User: <Context> + <Question>
-        # Model: <Answer>
-        
-        # Let's build a fresh request for this turn
+        # 4. Generate
         response = client.models.generate_content(
-            model='gemini-2.5-flash', # Using model requested by user
+            model='gemini-2.5-flash',
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.7,
@@ -255,31 +294,35 @@ def generate_chat_response(message_history, user_query, user):
             sources_str = parts[1].strip()
             
             if sources_str != "NONE":
-                # Get all available docs from context
-                available_docs = {chunk.document.title: chunk.document for chunk in relevant_chunks}
-                
-                # Match titles
-                source_titles = [t.strip() for t in sources_str.split(',')]
-                for title in source_titles:
-                    # Simple fuzzy match or exact match
-                    # Trying exact match first since we told LLM to use exact titles
-                    if title in available_docs:
-                        referenced_documents.append(available_docs[title])
-                    else:
-                        # Fallback: check if title is contained in any available doc title
-                        for avail_title, doc in available_docs.items():
-                            if title.lower() in avail_title.lower():
-                                referenced_documents.append(doc)
-                                break
-            
-            # Remove duplicates
-            referenced_documents = list(set(referenced_documents))
-        else:
-            # Fallback for safe measure: if LLM ignored instruction, use old logic but maybe limit it?
-            # Or just return nothing to be strict. Let's return nothing to avoid "Sources" clutter.
-            referenced_documents = [] # list({chunk.document for chunk in relevant_chunks})
-
+                 # We simply return the distinct docs found in relevant_chunks which match the titles.
+                 source_titles = [t.strip().lower() for t in sources_str.split(',')]
+                 seen_ids = set()
+                 
+                 # Create a map for quick lookup
+                 # chunk.document is a lightweight object with id and title
+                 available_docs = {}
+                 for chunk in relevant_chunks:
+                     available_docs[chunk.document.title.lower()] = chunk.document
+                 
+                 for title in source_titles:
+                     # 1. Exact match (case-insensitive)
+                     if title in available_docs:
+                         doc = available_docs[title]
+                         if doc.id not in seen_ids:
+                             referenced_documents.append(doc)
+                             seen_ids.add(doc.id)
+                         continue
+                     
+                     # 2. Partial match (if LLM shortened the title)
+                     for available_title, doc in available_docs.items():
+                         if title in available_title or available_title in title:
+                             if doc.id not in seen_ids:
+                                 referenced_documents.append(doc)
+                                 seen_ids.add(doc.id)
+                             break
+        
         return final_text, referenced_documents
+        
     except Exception as e:
         print(f"Error generating response: {e}")
-        return "I encountered an error while processing your request. Please try again later.", []
+        return "I encountered an error while processing your request.", []
