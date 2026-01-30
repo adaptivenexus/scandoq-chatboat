@@ -304,6 +304,10 @@ def generate_chat_response(message_history, user_query, user):
                  for chunk in relevant_chunks:
                      available_docs[chunk.document.title.lower()] = chunk.document
                  
+                 print(f"DEBUG: Raw Sources Line: {sources_str}")
+                 print(f"DEBUG: Parsed Titles: {source_titles}")
+                 print(f"DEBUG: Available Docs: {list(available_docs.keys())}")
+
                  for title in source_titles:
                      # 1. Exact match (case-insensitive)
                      if title in available_docs:
@@ -320,8 +324,17 @@ def generate_chat_response(message_history, user_query, user):
                                  referenced_documents.append(doc)
                                  seen_ids.add(doc.id)
                              break
+                 print(f"DEBUG: Final Referenced Docs: {[d.title for d in referenced_documents]}")
+
+                 # CRITICAL FIX: The documents in referenced_documents are "detached" instances created manually.
+                 # We must fetch the REAL objects from the database to save them to the ManyToMany field.
+                 if referenced_documents:
+                     doc_ids = [d.id for d in referenced_documents]
+                     # Fetch actual objects from DB
+                     real_docs = list(Document.objects.filter(id__in=doc_ids))
+                     return final_text, real_docs
         
-        return final_text, referenced_documents
+        return final_text, []
         
     except Exception as e:
         print(f"Error generating response: {e}")
