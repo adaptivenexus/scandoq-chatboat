@@ -17,7 +17,7 @@ export default function DocumentPreview({
     fileUrl,
     highlightKeyword,
 }: DocumentPreviewProps) {
-    console.log("🎬 DocumentPreview RENDER - fileUrl:", fileUrl, "highlightKeyword:", highlightKeyword);
+
 
     // Track the last highlighted keyword to prevent infinite loops
     const lastHighlightedKeyword = useRef<string>("");
@@ -31,6 +31,9 @@ export default function DocumentPreview({
     // Extract the highlight method
     const { highlight } = searchPluginInstance;
 
+    // Ref for the container to check for highlight elements
+    const containerRef = useRef<HTMLDivElement>(null);
+
     // Reset document loaded state when fileUrl changes
     useEffect(() => {
         setIsDocumentLoaded(false);
@@ -39,9 +42,7 @@ export default function DocumentPreview({
 
     // Trigger highlighting when keyword changes AND document is loaded
     useEffect(() => {
-        console.log("🔍 DocumentPreview - highlightKeyword:", highlightKeyword);
-        console.log("🔍 Last highlighted:", lastHighlightedKeyword.current);
-        console.log("📄 Document loaded:", isDocumentLoaded);
+
 
         // Only highlight if the keyword has actually changed AND document is loaded
         if (
@@ -50,33 +51,49 @@ export default function DocumentPreview({
             highlightKeyword.trim() &&
             highlightKeyword !== lastHighlightedKeyword.current
         ) {
-            console.log("✅ Calling highlight() with keyword:", highlightKeyword);
+
             lastHighlightedKeyword.current = highlightKeyword;
 
-            // Small delay to ensure the document is fully rendered
+            // STRATEGY: Try Exact Phrase -> Fallback to Split Words
+            // 1. Try highlighting the exact phrase first
             setTimeout(() => {
-                highlight([
-                    {
-                        keyword: highlightKeyword,
-                        matchCase: false,
-                    },
-                ]);
-            }, 300);
-        } else {
-            console.log("❌ Not highlighting - condition not met");
+                highlight([{
+                    keyword: highlightKeyword,
+                    matchCase: false,
+                }]);
+
+                // 2. Check if any highlights were created after a short render delay
+                setTimeout(() => {
+                    const hasMatches = containerRef.current?.querySelectorAll('.rpv-search__highlight').length &&
+                        containerRef.current?.querySelectorAll('.rpv-search__highlight').length > 0;
+
+                    if (!hasMatches) {
+                        // Split the keyword string into individual words to handle non-contiguous matches
+                        // This is important for tables where "Website Development" and "Cost" might be far apart
+                        const keywords = highlightKeyword.split(/\s+/).filter(k => k.length > 1);
+
+                        // Create highlight parameters for each individual word
+                        const highlightParams = keywords.map(k => ({
+                            keyword: k,
+                            matchCase: false,
+                        }));
+
+                        highlight(highlightParams);
+                    }
+                }, 500); // Wait for exact match render
+            }, 300); // Wait for document ready
         }
         // ONLY depend on highlightKeyword and isDocumentLoaded
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [highlightKeyword, isDocumentLoaded]);
 
     return (
-        <div className="h-full w-full">
+        <div className="h-full w-full" ref={containerRef}>
             <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
                 <Viewer
                     fileUrl={fileUrl}
                     plugins={[defaultLayoutPluginInstance, searchPluginInstance]}
                     onDocumentLoad={() => {
-                        console.log("📗 PDF Document loaded!");
                         setIsDocumentLoaded(true);
                     }}
                 />

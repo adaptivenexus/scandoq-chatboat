@@ -537,21 +537,34 @@ export default function Chat() {
                                         : `http://127.0.0.1:8000${doc.file}`;
                                       setSelectedDocument(fileUrl);
                                       // Set the citation text for highlighting
-                                      // Find the user's query (the message before this AI response)
-                                      const userQuery = index > 0 && messages[index - 1].role === "user"
-                                        ? messages[index - 1].content
-                                        : "";
+                                      // Use the AI's response content to find the answer in the text
+                                      const highlightSource = msg.content || "";
+
+                                      // Smart Length Check: Don't highlight if the response is too long (like a summary)
+                                      // Threshold: 50 words
+                                      const wordCount = highlightSource.split(/\s+/).length;
+                                      if (wordCount > 50) {
+                                        setSelectedCitation(""); // Clear/Don't highlight
+                                        return;
+                                      }
 
                                       // Extract meaningful keywords (remove common stop words)
-                                      const stopWords = ['in', 'which', 'doc', 'document', 'there', 'is', 'are', 'was', 'were', 'written', 'tell', 'me', 'about', 'what', 'where', 'who', 'when', 'how', 'the', 'a', 'an', 'and', 'or', 'but'];
-                                      const keywords = userQuery
+                                      const stopWords = [
+                                        'in', 'which', 'doc', 'document', 'test', 'there', 'is', 'are', 'was', 'were', 'written',
+                                        'tell', 'me', 'about', 'what', 'where', 'who', 'when', 'how', 'the', 'a', 'an',
+                                        'and', 'or', 'but', 'for', 'of', 'to', 'with', 'from', 'at', 'by', 'on', 'source', 'sources'
+                                      ];
+                                      const keywords = highlightSource
                                         .toLowerCase()
                                         .split(/\s+/)
-                                        .filter(word => word.length > 2 && !stopWords.includes(word))
+                                        .map(word => word.replace(/[.,;:!?)]+$/, "").replace(/^[(]+/, "")) // Strip trailing/leading punctuation
+                                        .filter(word => {
+                                          if (stopWords.includes(word)) return false;
+                                          if (word.length < 2) return false; // Filter very short words
+                                          return true; // Keep everything else including numbers/currency
+                                        })
                                         .join(' ');
 
-                                      console.log("📝 Original query:", userQuery);
-                                      console.log("🔑 Extracted keywords:", keywords);
                                       setSelectedCitation(keywords);
                                     }}
                                     className="flex items-center gap-2 text-xs bg-white border border-gray-200 rounded-md px-2.5 py-1.5 text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-colors shadow-sm"

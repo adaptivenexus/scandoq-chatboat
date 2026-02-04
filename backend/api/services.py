@@ -79,7 +79,7 @@ def process_document(document_id):
                 client = get_client()
                 if client:
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3-flash-preview',
                         contents=[
                             types.Content(
                                 parts=[
@@ -124,7 +124,7 @@ def process_document(document_id):
                     )
                 )
             
-        DocumentChunk.objects.bulk_create(document_chunks)
+        DocumentChunk.objects.bulk_create(document_chunks, batch_size=500)
         
         # Update processed status
         doc.is_processed = True
@@ -158,7 +158,9 @@ def search_documents(query, user, limit=5):
         
         # Search in database using pgvector L2 distance
         # Filter by documents owned by the user
+        # Use select_related to avoid N+1 query problem when accessing document.title
         chunks = DocumentChunk.objects.filter(document__user=user) \
+            .select_related('document') \
             .annotate(distance=L2Distance('embedding', query_embedding)) \
             .order_by('distance')[:limit]
             
@@ -188,12 +190,13 @@ def generate_chat_response(message_history, user_query, user):
         system_instruction = (
             "You are a helpful and intelligent assistant named 'Nexus'. "
             "You have access to the user's uploaded documents via the Context provided below. "
-            "Always prioritize the information in the Context when answering. "
-            "If the Context contains the answer, cite the information using the Document Name provided in the header (e.g., '**Document: Filename.pdf**'). "
-            "Do NOT refer to 'chunks' or 'sections' by their internal index; simply refer to the document title. "
-            "If the Context does not contain the answer, you can answer from your general knowledge, "
-            "but explicitly state that you couldn't find it in the uploaded documents. "
-            "Be concise and professional. "
+            "Always prioritize the information in the Context when answering.\n\n"
+            "**FORMATTING RULES:**\n"
+            "1. **Structured Usage:** If using information from multiple documents, **group your answer by document**. Use Markdown headers (e.g., '### Document Name') to separate sections.\n"
+            "2. **Bullet Points:** Use bullet points for lists, summaries, or key details to improve readability.\n"
+            "3. **Citations:** Cite the document name (e.g., '**Source: Filename.pdf**') when referring to specific facts.\n"
+            "4. **No Internal Indices:** Do NOT refer to 'chunks' or 'indexes'.\n"
+            "5. **General Knowledge:** If Context doesn't contain the answer, use general knowledge but explicitly state that it's not from the uploaded documents.\n\n"
             "If user says hi or hello greet them with 'Hello! How can I help you today?'.\n\n"
             "CRITICAL INSTRUCTION: at the very end of your response, on a new line, you MUST list the exact titles of the documents from the Context that you actually used to answer the question. "
             "Format the line exactly as: 'USED_SOURCES: title1, title2'. "
