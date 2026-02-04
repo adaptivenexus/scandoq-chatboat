@@ -46,7 +46,9 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
+    if (messages.length > 0) {
+      scrollToBottom();
+    }
   }, [messages]);
 
   const scrollToBottom = () => {
@@ -510,7 +512,7 @@ export default function Chat() {
                             },
                           }}
                         >
-                          {msg.content}
+                          {typeof msg.content === 'string' ? msg.content : String(msg.content || '')}
                         </ReactMarkdown>
 
                         {/* Document References */}
