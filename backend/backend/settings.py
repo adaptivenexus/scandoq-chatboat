@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    "pgvector.django",
     'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',
@@ -75,7 +76,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    # 'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    #'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
 CORS_ALLOWED_ORIGINS = [
@@ -106,9 +107,19 @@ WSGI_APPLICATION = 'backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+env_db_url = os.environ.get('DATABASE_URL')
+if not env_db_url:
+    db_name = os.getenv('DB_NAME') or os.getenv('DATABASE_NAME')
+    env_db_url = (
+        f"postgres://{os.getenv('DATABASE_USER','')}:{os.getenv('DATABASE_PASSWORD','')}"
+        f"@{os.getenv('DATABASE_HOST','localhost')}:"
+        f"{os.getenv('DATABASE_PORT','5432')}/{db_name}"
+    )
+
 DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL', 'sqlite:///' + str(BASE_DIR / 'db.sqlite3'))
+    "default": dj_database_url.config(
+        default=env_db_url,
+        conn_max_age=600
     )
 }
 
@@ -150,3 +161,4 @@ USE_TZ = True
 STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

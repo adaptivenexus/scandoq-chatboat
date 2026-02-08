@@ -41,7 +41,7 @@ class DocumentChunk(models.Model):
     document = models.ForeignKey(Document, related_name='chunks', on_delete=models.CASCADE, db_index=True)
     chunk_index = models.IntegerField(db_index=True)
     content = models.TextField()
-    embedding = VectorField(dimensions=768)  # Gemini embedding-004 uses 768 dimensions
+    embedding = VectorField(dimensions=3072)  # Gemini gemini-embedding-001 uses 3072 dimensions
     
     class Meta:
         ordering = ['chunk_index']

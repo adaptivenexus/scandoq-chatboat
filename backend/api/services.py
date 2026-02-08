@@ -24,7 +24,7 @@ def get_embedding(text):
 
     try:
         result = client.models.embed_content(
-            model="text-embedding-004",
+            model="gemini-embedding-001",
             contents=text,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_DOCUMENT",
@@ -148,7 +148,7 @@ def search_documents(query, user, limit=5):
     try:
         # Generate embedding for the query
         query_embedding_result = client.models.embed_content(
-            model="text-embedding-004",
+            model="gemini-embedding-001",
             contents=query,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_QUERY"
