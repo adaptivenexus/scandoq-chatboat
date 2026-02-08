@@ -38,10 +38,13 @@ class Document(models.Model):
         return self.title
 
 class DocumentChunk(models.Model):
-    document = models.ForeignKey(Document, related_name='chunks', on_delete=models.CASCADE)
-    chunk_index = models.IntegerField()
+    document = models.ForeignKey(Document, related_name='chunks', on_delete=models.CASCADE, db_index=True)
+    chunk_index = models.IntegerField(db_index=True)
     content = models.TextField()
-    embedding = VectorField(dimensions=768)  # Gemini embedding-001 has 768 dims
+    embedding = VectorField(dimensions=768)  # Gemini embedding-004 uses 768 dimensions
     
     class Meta:
         ordering = ['chunk_index']
+        indexes = [
+            models.Index(fields=['document', 'chunk_index']),  # Composite index for common queries
+        ]

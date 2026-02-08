@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { endpoints } from "../config";
+import DocumentPreview from "./DocumentPreview";
 
 interface Document {
   id: number;
@@ -36,6 +37,7 @@ export default function Chat() {
   >(null);
   const [editTitle, setEditTitle] = useState("");
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
+  const [selectedCitation, setSelectedCitation] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,6 +95,7 @@ export default function Chat() {
     setCurrentConversationId(conversation.id);
     setMessages(conversation.messages || []);
     setSelectedDocument(null);
+    setSelectedCitation("");
   };
 
   const deleteConversation = async (e: React.MouseEvent, id: number) => {
@@ -511,35 +514,72 @@ export default function Chat() {
                         </ReactMarkdown>
 
                         {/* Document References */}
-                        {msg.documents && msg.documents.length > 0 && (
-                          <div className="mt-4 pt-3 border-t border-gray-200/50">
-                            <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
-                              Sources
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              {msg.documents.map((doc) => (
-                                <button
-                                  key={doc.id}
-                                  onClick={() => {
-                                    // Handle relative paths from Django (which start with /media)
-                                    // Use hardcoded backend URL for now as API_BASE_URL has /api suffix
-                                    const fileUrl = doc.file.startsWith("http")
-                                      ? doc.file
-                                      : `http://127.0.0.1:8000${doc.file}`;
-                                    setSelectedDocument(fileUrl);
-                                  }}
-                                  className="flex items-center gap-2 text-xs bg-white border border-gray-200 rounded-md px-2.5 py-1.5 text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-colors shadow-sm"
-                                  title="Click to preview"
-                                >
-                                  <span>📄</span>
-                                  <span className="font-medium underline truncate max-w-[150px]">
-                                    {doc.title}
-                                  </span>
-                                </button>
-                              ))}
+                        {msg.documents && msg.documents.length > 0 && (() => {
+                          // Deduplicate sources by document ID
+                          const uniqueDocs = Array.from(
+                            new Map(msg.documents.map(doc => [doc.id, doc])).values()
+                          );
+
+                          return (
+                            <div className="mt-4 pt-3 border-t border-gray-200/50">
+                              <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
+                                Sources
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {uniqueDocs.map((doc) => (
+                                  <button
+                                    key={doc.id}
+                                    onClick={() => {
+                                      // Handle relative paths from Django (which start with /media)
+                                      // Use hardcoded backend URL for now as API_BASE_URL has /api suffix
+                                      const fileUrl = doc.file.startsWith("http")
+                                        ? doc.file
+                                        : `http://127.0.0.1:8000${doc.file}`;
+                                      setSelectedDocument(fileUrl);
+                                      // Set the citation text for highlighting
+                                      // Use the AI's response content to find the answer in the text
+                                      const highlightSource = msg.content || "";
+
+                                      // Smart Length Check: Don't highlight if the response is too long (like a summary)
+                                      // Threshold: 50 words
+                                      const wordCount = highlightSource.split(/\s+/).length;
+                                      if (wordCount > 50) {
+                                        setSelectedCitation(""); // Clear/Don't highlight
+                                        return;
+                                      }
+
+                                      // Extract meaningful keywords (remove common stop words)
+                                      const stopWords = [
+                                        'in', 'which', 'doc', 'document', 'test', 'there', 'is', 'are', 'was', 'were', 'written',
+                                        'tell', 'me', 'about', 'what', 'where', 'who', 'when', 'how', 'the', 'a', 'an',
+                                        'and', 'or', 'but', 'for', 'of', 'to', 'with', 'from', 'at', 'by', 'on', 'source', 'sources'
+                                      ];
+                                      const keywords = highlightSource
+                                        .toLowerCase()
+                                        .split(/\s+/)
+                                        .map(word => word.replace(/[.,;:!?)]+$/, "").replace(/^[(]+/, "")) // Strip trailing/leading punctuation
+                                        .filter(word => {
+                                          if (stopWords.includes(word)) return false;
+                                          if (word.length < 2) return false; // Filter very short words
+                                          return true; // Keep everything else including numbers/currency
+                                        })
+                                        .join(' ');
+
+                                      setSelectedCitation(keywords);
+                                    }}
+                                    className="flex items-center gap-2 text-xs bg-white border border-gray-200 rounded-md px-2.5 py-1.5 text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-colors shadow-sm"
+                                    title="Click to preview"
+                                  >
+                                    <span>📄</span>
+                                    <span className="font-medium underline truncate max-w-[150px]">
+                                      {doc.title}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     </div>
                   ))}
@@ -634,7 +674,10 @@ export default function Chat() {
                   </svg>
                 </a>
                 <button
-                  onClick={() => setSelectedDocument(null)}
+                  onClick={() => {
+                    setSelectedDocument(null);
+                    setSelectedCitation("");
+                  }}
                   className="p-1.5 text-gray-500 hover:bg-gray-200 rounded"
                   title="Close preview"
                 >
@@ -655,11 +698,10 @@ export default function Chat() {
                 </button>
               </div>
             </div>
-            <div className="flex-1 bg-gray-100 p-4">
-              <iframe
-                src={selectedDocument}
-                className="w-full h-full border border-gray-300 rounded shadow-sm bg-white"
-                title="Document Preview"
+            <div className="flex-1 overflow-hidden">
+              <DocumentPreview
+                fileUrl={selectedDocument}
+                highlightKeyword={selectedCitation}
               />
             </div>
           </div>

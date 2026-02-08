@@ -1,7 +1,15 @@
 import { Outlet, useNavigate, Link } from "react-router-dom";
+import { useEffect } from "react";
 
 export default function Layout() {
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      navigate("/login");
+    }
+  }, [navigate]);
 
   const handleLogout = () => {
     localStorage.removeItem("token");
