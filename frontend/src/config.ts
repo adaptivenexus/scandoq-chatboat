@@ -5,4 +5,5 @@ export const endpoints = {
   signup: `${API_BASE_URL}/signup/`,
   conversations: `${API_BASE_URL}/conversations/`,
   documents: `${API_BASE_URL}/documents/`,
+  profile: `${API_BASE_URL}/profile/`,
 };

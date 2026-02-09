@@ -20,3 +20,12 @@ class ConversationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Conversation
         fields = ['id', 'title', 'created_at', 'updated_at', 'messages']
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username')
+    email = serializers.CharField(source='user.email')
+
+    class Meta:
+        from .models import UserProfile
+        model = UserProfile
+        fields = ['credits', 'username', 'email']

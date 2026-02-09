@@ -3,8 +3,8 @@ from django.db import connection
 from rest_framework import viewsets, status, permissions, parsers
 from rest_framework.decorators import action, permission_classes
 from rest_framework.response import Response
-from .models import Conversation, Message, Document
-from .serializers import ConversationSerializer, MessageSerializer, DocumentSerializer
+from .models import Conversation, Message, Document, UserProfile, UsageLog
+from .serializers import ConversationSerializer, MessageSerializer, DocumentSerializer, UserProfileSerializer
 from .services import process_document, search_documents, generate_chat_response
 
 @permission_classes([permissions.AllowAny])
@@ -21,6 +21,16 @@ def health_check(request):
         "status": "ok",
         "database": db_status
     })
+
+from rest_framework.decorators import api_view, permission_classes
+from .models import UserProfile
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def user_profile(request):
+    profile, created = UserProfile.objects.get_or_create(user=request.user)
+    serializer = UserProfileSerializer(profile)
+    return Response(serializer.data)
 
 class ConversationViewSet(viewsets.ModelViewSet):
     serializer_class = ConversationSerializer
@@ -112,7 +122,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
             previous_history = previous_history[-10:]
         
         # Call RAG service
-        ai_response_content, referenced_docs = generate_chat_response(previous_history, content, request.user)
+        ai_response_content, referenced_docs, usage_data = generate_chat_response(previous_history, content, request.user)
         
         ai_message = Message.objects.create(
             conversation=conversation,
@@ -122,6 +132,38 @@ class ConversationViewSet(viewsets.ModelViewSet):
         
         if referenced_docs:
             ai_message.documents.set(referenced_docs)
+            
+        # TRACK CREDITS & USAGE
+        if usage_data:
+            try:
+                input_tokens = usage_data.get('input_tokens', 0)
+                output_tokens = usage_data.get('output_tokens', 0)
+                total_tokens = usage_data.get('total_tokens', input_tokens + output_tokens)
+                
+                # Credit Calculation:
+                # Example Rate: 1 Credit = 1000 Tokens
+                cost = total_tokens / 1000.0
+                
+                # Update User Profile
+                if not hasattr(request.user, 'profile'):
+                    UserProfile.objects.create(user=request.user)
+                
+                profile = request.user.profile
+                profile.credits -= cost
+                profile.save()
+                
+                # Log usage
+                UsageLog.objects.create(
+                    user=request.user,
+                    conversation=conversation,
+                    message=ai_message,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    cost=cost
+                )
+            except Exception as e:
+                print(f"Error logging usage: {e}")
 
         # Update conversation timestamp
         conversation.save()

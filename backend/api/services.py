@@ -24,7 +24,7 @@ def get_embedding(text):
 
     try:
         result = client.models.embed_content(
-            model="text-embedding-004",
+            model="models/gemini-embedding-001",
             contents=text,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_DOCUMENT",
@@ -79,7 +79,7 @@ def process_document(document_id):
                 client = get_client()
                 if client:
                     response = client.models.generate_content(
-                        model='gemini-3-flash-preview',
+                        model='gemini-1.5-flash',
                         contents=[
                             types.Content(
                                 parts=[
@@ -148,7 +148,7 @@ def search_documents(query, user, limit=5):
     try:
         # Generate embedding for the query
         query_embedding_result = client.models.embed_content(
-            model="text-embedding-004",
+            model="models/gemini-embedding-001",
             contents=query,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_QUERY"
@@ -175,7 +175,7 @@ def generate_chat_response(message_history, user_query, user):
     """
     client = get_client()
     if not client:
-        return "Error: GOOGLE_API_KEY is missing.", []
+        return "Error: GOOGLE_API_KEY is missing.", [], {}
 
     try:
         # 1. Search for relevant context
@@ -282,7 +282,19 @@ def generate_chat_response(message_history, user_query, user):
             # Or just return nothing to be strict. Let's return nothing to avoid "Sources" clutter.
             referenced_documents = [] # list({chunk.document for chunk in relevant_chunks})
 
-        return final_text, referenced_documents
+        # Extract Usage Metadata
+        usage_data = {}
+        try:
+            if hasattr(response, 'usage_metadata'):
+                usage_data = {
+                    'input_tokens': response.usage_metadata.prompt_token_count,
+                    'output_tokens': response.usage_metadata.candidates_token_count,
+                    'total_tokens': response.usage_metadata.total_token_count
+                }
+        except Exception as e:
+            print(f"Error extracting usage metadata: {e}")
+
+        return final_text, referenced_documents, usage_data
     except Exception as e:
         print(f"Error generating response: {e}")
-        return "I encountered an error while processing your request. Please try again later.", []
+        return "I encountered an error while processing your request. Please try again later.", [], {}

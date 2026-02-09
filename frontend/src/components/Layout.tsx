@@ -1,14 +1,39 @@
 import { Outlet, useNavigate, Link } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { endpoints } from "../config";
+
 
 export default function Layout() {
   const navigate = useNavigate();
+  const [credits, setCredits] = useState<number | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
       navigate("/login");
+      return;
     }
+
+    // Fetch credits
+    const fetchCredits = async () => {
+      try {
+        const response = await fetch(endpoints.profile, {
+          headers: { Authorization: `Token ${token}` },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setCredits(data.credits);
+        }
+      } catch (error) {
+        console.error("Error fetching usage:", error);
+      }
+    };
+
+    fetchCredits();
+    // Poll every 10 seconds to keep credits updated
+    const interval = setInterval(fetchCredits, 10000);
+
+    return () => clearInterval(interval);
   }, [navigate]);
 
   const handleLogout = () => {
@@ -33,7 +58,15 @@ export default function Layout() {
           </nav>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-6">
+          {credits !== null && (
+            <div className="bg-gray-100 px-3 py-1 rounded-full border border-gray-200 text-sm font-medium flex items-center gap-2" title="Remaining Credits">
+              <span className="text-gray-500 text-xs">Credits:</span>
+              <span className={`${credits < 20 ? 'text-red-600' : 'text-gray-900'}`}>
+                {credits.toFixed(2)}
+              </span>
+            </div>
+          )}
           <button
             onClick={handleLogout}
             className="text-sm font-medium hover:text-red-600"
