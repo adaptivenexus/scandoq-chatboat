@@ -1,4 +1,6 @@
 import os
+import tempfile
+import shutil
 from google import genai
 from google.genai import types
 from langchain_community.document_loaders import PyPDFLoader
@@ -41,77 +43,99 @@ def process_document(document_id):
     Reads the document file, splits it into chunks, generates embeddings using Gemini,
     and stores them in the DocumentChunk model.
     """
+    print(f"Processing document ID: {document_id}")
     if not os.getenv('GOOGLE_API_KEY'):
         print("GOOGLE_API_KEY not found. Skipping processing.")
         return False, "Missing API Key"
 
     try:
         doc = Document.objects.get(id=document_id)
-        file_path = doc.file.path
+        file_name = doc.file.name.lower()
+        print(f"File: {file_name}")
         
-        # 1. Load Document content
-        text = ""
-        if file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
-            pages = loader.load()
-            text = "\n".join([p.page_content for p in pages])
-        elif file_path.lower().endswith('.txt') or file_path.lower().endswith('.md'):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-        else:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except Exception:
-                return False, "Unsupported file format"
+        # Create a temporary file to process the document
+        temp_file_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_name)[1]) as temp_file:
+                print("Downloading file from storage...")
+                shutil.copyfileobj(doc.file.open('rb'), temp_file)
+                temp_file_path = temp_file.name
+            print(f"File downloaded to {temp_file_path}")
 
-        if not text.strip():
-            # Fallback: Try using Gemini to extract text (e.g. for scanned PDFs)
-            print(f"Basic extraction failed for {doc.title}. Trying Gemini extraction...")
-            try:
-                with open(file_path, "rb") as f:
-                    file_content = f.read()
-                
-                mime_type = "application/pdf"
-                if file_path.lower().endswith('.txt'): mime_type = "text/plain"
-                elif file_path.lower().endswith('.md'): mime_type = "text/markdown"
-                
-                client = get_client()
-                if client:
-                    response = client.models.generate_content(
-                        model='gemini-1.5-flash',
-                        contents=[
-                            types.Content(
-                                parts=[
-                                    types.Part.from_bytes(data=file_content, mime_type=mime_type),
-                                    types.Part.from_text(text="Extract all text from this document for indexing. Return only the extracted text, no meta-commentary.")
-                                ]
-                            )
-                        ]
-                    )
-                    text = response.text
-            except Exception as e:
-                print(f"Gemini fallback failed: {e}")
+            # 1. Load Document content
+            text = ""
+            print("Attempting text extraction...")
+            if file_name.endswith('.pdf'):
+                loader = PyPDFLoader(temp_file_path)
+                pages = loader.load()
+                text = "\n".join([p.page_content for p in pages])
+            elif file_name.endswith('.txt') or file_name.endswith('.md'):
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
+            else:
+                 # Attempt generic read
+                try:
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+                except Exception:
+                     pass
+            
+            print(f"Extraction result length: {len(text)}")
+
+            if not text.strip():
+                print(f"Basic extraction failed for {doc.title}. Trying Gemini extraction (OCR/Fallback)...")
+                try:
+                    with open(temp_file_path, "rb") as f:
+                        file_content = f.read()
+                    
+                    mime_type = "application/pdf"
+                    if file_name.endswith('.txt'): mime_type = "text/plain"
+                    elif file_name.endswith('.md'): mime_type = "text/markdown"
+                    
+                    client = get_client()
+                    if client:
+                        print("Calling Gemini generate_content...")
+                        response = client.models.generate_content(
+                            model='gemini-2.0-flash',
+                            contents=[
+                                types.Content(
+                                    parts=[
+                                        types.Part.from_bytes(data=file_content, mime_type=mime_type),
+                                        types.Part.from_text(text="Extract all text from this document for indexing. Return only the extracted text, no meta-commentary.")
+                                    ]
+                                )
+                            ]
+                        )
+                        text = response.text
+                        print("Gemini extraction successful.")
+                except Exception as e:
+                    print(f"Gemini fallback failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
 
         if not text or not text.strip():
             return False, "Empty document (could not extract text)"
 
-        # Sanitize text: Remove null bytes which PostgreSQL cannot handle
+        # Sanitize text
         text = text.replace('\x00', '')
 
         # 2. Split Text
+        print("Splitting text...")
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
             length_function=len,
         )
         chunks = text_splitter.split_text(text)
+        print(f"Created {len(chunks)} chunks.")
         
         # 3. Generate Embeddings & Save
         document_chunks = []
         
-        # Gemini has rate limits, but for small docs it's fine. 
-        # For production, implement batching or retry logic.
         for i, chunk_text in enumerate(chunks):
             embedding = get_embedding(chunk_text)
             if embedding:
@@ -126,7 +150,6 @@ def process_document(document_id):
             
         DocumentChunk.objects.bulk_create(document_chunks, batch_size=500)
         
-        # Update processed status
         doc.is_processed = True
         doc.save()
 
@@ -135,6 +158,8 @@ def process_document(document_id):
         
     except Exception as e:
         print(f"Error processing document {document_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False, str(e)
 
 def search_documents(query, user, limit=5):
@@ -238,7 +263,7 @@ def generate_chat_response(message_history, user_query, user):
         
         # Let's build a fresh request for this turn
         response = client.models.generate_content(
-            model='gemini-2.5-flash', # Using model requested by user
+            model='gemini-3-flash-preview', # Using model requested by user
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.7,

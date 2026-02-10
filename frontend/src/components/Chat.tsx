@@ -8,6 +8,7 @@ interface Document {
   id: number;
   title: string;
   file: string;
+  file_url: string;
 }
 
 interface Message {
@@ -532,9 +533,9 @@ export default function Chat() {
                                     onClick={() => {
                                       // Handle relative paths from Django (which start with /media)
                                       // Use hardcoded backend URL for now as API_BASE_URL has /api suffix
-                                      const fileUrl = doc.file.startsWith("http")
+                                      const fileUrl = doc.file_url || (doc.file.startsWith("http")
                                         ? doc.file
-                                        : `http://127.0.0.1:8000${doc.file}`;
+                                        : `http://127.0.0.1:8000${doc.file}`);
                                       setSelectedDocument(fileUrl);
                                       // Set the citation text for highlighting
                                       // Use the AI's response content to find the answer in the text

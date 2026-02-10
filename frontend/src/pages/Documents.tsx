@@ -5,6 +5,7 @@ interface Document {
   id: number;
   title: string;
   file: string;
+  file_url: string;
   uploaded_at: string;
   is_processed: boolean;
 }
@@ -171,7 +172,7 @@ export default function Documents() {
                 </button>
               )}
               <a
-                href={doc.file}
+                href={doc.file_url || doc.file}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-blue-600 hover:underline"
