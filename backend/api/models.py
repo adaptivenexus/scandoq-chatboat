@@ -1,6 +1,5 @@
 from django.db import models
 from django.contrib.auth.models import User
-from pgvector.django import VectorField
 
 class Conversation(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
@@ -10,22 +9,6 @@ class Conversation(models.Model):
 
     def __str__(self):
         return f"{self.title or 'Untitled'} ({self.id})"
-
-class Message(models.Model):
-    ROLE_CHOICES = [
-        ('user', 'User'),
-        ('assistant', 'Assistant'),
-        ('system', 'System'),
-    ]
-
-    conversation = models.ForeignKey(Conversation, related_name='messages', on_delete=models.CASCADE)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
-    content = models.TextField()
-    documents = models.ManyToManyField('Document', related_name='referenced_in_messages', blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.role}: {self.content[:50]}..."
 
 class Document(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -37,17 +20,21 @@ class Document(models.Model):
     def __str__(self):
         return self.title
 
-class DocumentChunk(models.Model):
-    document = models.ForeignKey(Document, related_name='chunks', on_delete=models.CASCADE, db_index=True)
-    chunk_index = models.IntegerField(db_index=True)
+class Message(models.Model):
+    ROLE_CHOICES = [
+        ('user', 'User'),
+        ('assistant', 'Assistant'),
+        ('system', 'System'),
+    ]
+
+    conversation = models.ForeignKey(Conversation, related_name='messages', on_delete=models.CASCADE)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     content = models.TextField()
-    embedding = VectorField(dimensions=3072)  # Gemini embedding-001 uses 3072 dimensions
-    
-    class Meta:
-        ordering = ['chunk_index']
-        indexes = [
-            models.Index(fields=['document', 'chunk_index']),  # Composite index for common queries
-        ]
+    documents = models.ManyToManyField(Document, related_name='referenced_in_messages', blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.role}: {self.content[:50]}..."
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')

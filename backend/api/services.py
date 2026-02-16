@@ -1,29 +1,31 @@
 import os
 import tempfile
 import shutil
+import lancedb
+import pandas as pd
+from django.conf import settings
 from google import genai
 from google.genai import types
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from api.models import Document, DocumentChunk
-from pgvector.django import L2Distance
+from api.models import Document
 
-# Configure Gemini
-# Ensure GOOGLE_API_KEY is in your environment variables
+# Simple wrapper to mimic the old DocumentChunk model behavior for compatibility
+class ChunkResult:
+    def __init__(self, document, content, score=0.0):
+        self.document = document
+        self.content = content
+        self.score = score
+
 def get_client():
     if os.getenv('GOOGLE_API_KEY'):
         return genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
     return None
 
 def get_embedding(text):
-    """
-    Generate embedding using Gemini model.
-    Using 'text-embedding-004' as it's the latest standard.
-    """
     client = get_client()
     if not client:
         return None
-
     try:
         result = client.models.embed_content(
             model="models/gemini-embedding-001",
@@ -38,180 +40,293 @@ def get_embedding(text):
         print(f"Error generating embedding: {e}")
         return None
 
+def get_db():
+    # Connect to LanceDB using the URI from settings
+    # If S3, ensured by environment vars for credentials
+    return lancedb.connect(settings.LANCEDB_URI)
+
 def process_document(document_id):
-    """
-    Reads the document file, splits it into chunks, generates embeddings using Gemini,
-    and stores them in the DocumentChunk model.
-    """
     print(f"Processing document ID: {document_id}")
     if not os.getenv('GOOGLE_API_KEY'):
-        print("GOOGLE_API_KEY not found. Skipping processing.")
         return False, "Missing API Key"
 
     try:
         doc = Document.objects.get(id=document_id)
         file_name = doc.file.name.lower()
-        print(f"File: {file_name}")
         
-        # Create a temporary file to process the document
+        # Download file to temp
         temp_file_path = None
+        text = ""
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_name)[1]) as temp_file:
-                print("Downloading file from storage...")
                 shutil.copyfileobj(doc.file.open('rb'), temp_file)
                 temp_file_path = temp_file.name
-            print(f"File downloaded to {temp_file_path}")
-
-            # 1. Load Document content
-            text = ""
-            print("Attempting text extraction...")
+            
+            # Text Extraction Logic
             if file_name.endswith('.pdf'):
                 loader = PyPDFLoader(temp_file_path)
                 pages = loader.load()
                 text = "\n".join([p.page_content for p in pages])
+            elif file_name.endswith('.docx'):
+                try:
+                    from docx import Document as DocxDocument
+                    doc_obj = DocxDocument(temp_file_path)
+                    text = "\n".join([para.text for para in doc_obj.paragraphs])
+                except ImportError:
+                    print("python-docx not installed.")
+                    return False, "Server missing python-docx library"
+                except Exception as e:
+                    print(f"Docx read error: {e}")
             elif file_name.endswith('.txt') or file_name.endswith('.md'):
                 with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     text = f.read()
             else:
-                 # Attempt generic read
                 try:
                     with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         text = f.read()
-                except Exception:
-                     pass
+                except:
+                    pass
             
-            print(f"Extraction result length: {len(text)}")
-
+            # Gemini OCR Fallback
             if not text.strip():
-                print(f"Basic extraction failed for {doc.title}. Trying Gemini extraction (OCR/Fallback)...")
-                try:
-                    with open(temp_file_path, "rb") as f:
-                        file_content = f.read()
-                    
-                    mime_type = "application/pdf"
-                    if file_name.endswith('.txt'): mime_type = "text/plain"
-                    elif file_name.endswith('.md'): mime_type = "text/markdown"
-                    
-                    client = get_client()
-                    if client:
-                        print("Calling Gemini generate_content...")
-                        response = client.models.generate_content(
-                            model='gemini-2.0-flash',
-                            contents=[
-                                types.Content(
-                                    parts=[
-                                        types.Part.from_bytes(data=file_content, mime_type=mime_type),
-                                        types.Part.from_text(text="Extract all text from this document for indexing. Return only the extracted text, no meta-commentary.")
-                                    ]
-                                )
-                            ]
-                        )
-                        text = response.text
-                        print("Gemini extraction successful.")
-                except Exception as e:
-                    print(f"Gemini fallback failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+                print("Basic extraction failed. Using Gemini OCR...")
+                with open(temp_file_path, "rb") as f:
+                    file_content = f.read()
+                mime_type = "application/pdf" if file_name.endswith('.pdf') else "text/plain"
+                
+                client = get_client()
+                if client:
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[types.Content(parts=[
+                            types.Part.from_bytes(data=file_content, mime_type=mime_type),
+                            types.Part.from_text(text="Extract all text. Return only text.")
+                        ])]
+                    )
+                    text = response.text
 
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
         if not text or not text.strip():
-            return False, "Empty document (could not extract text)"
-
-        # Sanitize text
+            return False, "Empty document"
+        
         text = text.replace('\x00', '')
 
-        # 2. Split Text
-        print("Splitting text...")
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-        )
+        # Chunking
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
         chunks = text_splitter.split_text(text)
-        print(f"Created {len(chunks)} chunks.")
         
-        # 3. Generate Embeddings & Save
-        document_chunks = []
+        # Vectorization & LanceDB Storage
+        db = get_db()
+        table_name = "vectors"
         
+        data = []
         for i, chunk_text in enumerate(chunks):
             embedding = get_embedding(chunk_text)
             if embedding:
-                document_chunks.append(
-                    DocumentChunk(
-                        document=doc,
-                        chunk_index=i,
-                        content=chunk_text,
-                        embedding=embedding
-                    )
-                )
-            
-        DocumentChunk.objects.bulk_create(document_chunks, batch_size=500)
+                data.append({
+                    "vector": embedding,
+                    "text": chunk_text,
+                    "doc_id": doc.id,
+                    "chunk_index": i
+                })
         
+        if not data:
+             return False, "No embeddings generated"
+
+        # Create or Append to Table
+        try:
+            tbl = db.open_table(table_name)
+            tbl.add(data)
+        except:
+            # Table doesn't exist, create it
+            db.create_table(table_name, data)
+
         doc.is_processed = True
         doc.save()
+        return True, len(data)
 
-        print(f"Successfully processed document {document_id}: {len(document_chunks)} chunks created.")
-        return True, len(document_chunks)
-        
     except Exception as e:
-        print(f"Error processing document {document_id}: {str(e)}")
+        print(f"Error processing document: {e}")
         import traceback
         traceback.print_exc()
         return False, str(e)
 
-def search_documents(query, user, limit=5):
-    """
-    Search for relevant document chunks using vector similarity.
-    """
+def search_documents(query, user, limit=3):
     client = get_client()
-    if not client:
-        return []
-
+    if not client: return []
+    
     try:
-        # Generate embedding for the query
+        # Check for Summary Intent
+        summary_keywords = ["summarize", "summary", "overview", "what is this document", "explain this file", "key takeaways"]
+        is_summary = any(k in query.lower() for k in summary_keywords)
+        
+        # 1. Embed Query (Get strictly RETRIEVAL_QUERY embedding if possible, or same as doc)
+        # Using same model as ingestion
         query_embedding_result = client.models.embed_content(
             model="models/gemini-embedding-001",
             contents=query,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_QUERY"
-            )
+            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
-        query_embedding = query_embedding_result.embeddings[0].values
+        query_vec = query_embedding_result.embeddings[0].values
+
+        # 2. Get User's Doc IDs from Postgres
+        # Optimization: Fetch ONLY the most recent document if it's a summary request
+        if is_summary:
+            # Get most recent doc
+            recent_doc = Document.objects.filter(user=user).order_by('-uploaded_at').first()
+            if not recent_doc: return []
+            user_doc_ids = [recent_doc.id]
+        else:
+            user_doc_ids = list(Document.objects.filter(user=user).values_list('id', flat=True))
+            if not user_doc_ids:
+                return []
+
+        # 3. Search LanceDB
+        db = get_db()
+        try:
+            tbl = db.open_table("vectors")
+        except:
+            return []
+
+        # Convert IDs to string for SQL filter (simplest safe way)
+        ids_str = ", ".join(map(str, user_doc_ids))
         
-        # Search in database using pgvector L2 distance
-        # Filter by documents owned by the user
-        # Use select_related to avoid N+1 query problem when accessing document.title
-        chunks = DocumentChunk.objects.filter(document__user=user) \
-            .select_related('document') \
-            .annotate(distance=L2Distance('embedding', query_embedding)) \
-            .order_by('distance')[:limit]
-            
+        if is_summary:
+            # For summary, DON'T use vector search. Just get the first N chunks.
+            # LanceDB SQL filter
+            results = tbl.search()\
+                .where(f"doc_id IN ({ids_str})")\
+                .limit(15)\
+                .to_list() # Get first 15 chunks (Intro + Content)
+        else:
+            # Standard Vector Search
+            results = tbl.search(query_vec) \
+                .where(f"doc_id IN ({ids_str})") \
+                .limit(limit) \
+                .to_list() # Returns list of dicts
+
+        # 4. Convert back to objects
+        chunks = []
+        # Optimization: Fetch all needed Document objects in one query
+        result_doc_ids = set(r['doc_id'] for r in results)
+        docs_map = {d.id: d for d in Document.objects.filter(id__in=result_doc_ids)}
+
+        for r in results:
+            if r['doc_id'] in docs_map:
+                chunks.append(ChunkResult(
+                    document=docs_map[r['doc_id']],
+                    content=r['text'],
+                    score=1.0 # LanceDB generic score
+                ))
+        
         return chunks
+
     except Exception as e:
         print(f"Error searching documents: {e}")
         return []
 
+# Non-streaming wrapper (legacy support if needed)
 def generate_chat_response(message_history, user_query, user):
-    """
-    Generate response using Gemini Flash model with RAG.
-    """
+    full_content = ""
+    usage_data = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    for chunk in generate_chat_response_stream(message_history, user_query, user):
+        if isinstance(chunk, dict) and "usage_metadata" in chunk:
+             # Capture final usage metadata if yielded
+             usage_data = chunk["usage_metadata"]
+        elif isinstance(chunk, str):
+             full_content += chunk
+    
+    # Parse USED_SOURCES from full_content
+    referenced_documents = []
+    final_text = full_content
+    
+    # Fallback Usage Calculation if API returns 0
+    if not usage_data or usage_data.get('total_tokens', 0) == 0:
+        # Estimation: 1 token ~= 4 chars
+        # Setup approximate counting
+        est_input = len(user_query) // 4
+        est_output = len(final_text) // 4
+        # Add context estimation (rough avg)
+        est_input += 500 
+        
+        usage_data = {
+            "input_tokens": est_input,
+            "output_tokens": est_output,
+            "total_tokens": est_input + est_output
+        }
+
+    potential_titles = set()
+
+    # 1. Parsing Strict USED_SOURCES block
+    if "USED_SOURCES:" in full_content:
+        parts = full_content.rsplit("USED_SOURCES:", 1)
+        final_text = parts[0].strip()
+        sources_str = parts[1].strip()
+        if sources_str != "NONE":
+             for t in sources_str.split(','):
+                 potential_titles.add(t.strip())
+
+    # 2. Regex Fallback for Inline Citations (Source: file)
+    import re
+    # Patterns: **Source: file**, (Source: file), Source: file
+    inline_matches = re.findall(r'Source:\s*([a-zA-Z0-9_.\s-]+)', final_text, re.IGNORECASE)
+    for m in inline_matches:
+        # Clean up punctuation slightly
+        clean_m = m.strip().rstrip('.').rstrip(')')
+        if len(clean_m) > 1: # Avoid single chars
+            potential_titles.add(clean_m)
+
+    # 3. Match Titles to Database
+    if potential_titles:
+        user_docs = Document.objects.filter(user=user)
+        for title in potential_titles:
+            # removing potential file matching issues
+            # 1. Exact match
+            doc = user_docs.filter(title__iexact=title).first()
+            if doc:
+                referenced_documents.append(doc)
+                continue
+            
+            # 2. Contains match (fallback)
+            doc = user_docs.filter(title__icontains=title).first()
+            if doc:
+                referenced_documents.append(doc)
+                continue
+
+            # 3. Reverse Contains (Filename in Title) - helpful if title is "Resume.pdf" and source is "Resume"
+            # We iterate docs for this
+            for d in user_docs:
+                # Check if "resume" is in "resume.pdf"
+                if title.lower() in d.title.lower():
+                    referenced_documents.append(d)
+                    break 
+
+    # Deduplicate referenced_docs
+    referenced_documents = list(set(referenced_documents))
+
+    # CLEANUP: Remove "Source: x" or "(Source: x)" text from the response since we show buttons
+    # Regex to remove "Source: filename" patterns (case insensitive)
+    # Handles: "**Source: file**", "(Source: file)", "Source: file"
+    final_text = re.sub(r'\**\(?Source:\s*[a-zA-Z0-9_.\s-]+\)?\**', '', final_text, flags=re.IGNORECASE).strip()
+    
+    # Return formatted response
+    return final_text, referenced_documents, usage_data
+
+def generate_chat_response_stream(message_history, user_query, user):
     client = get_client()
     if not client:
-        return "Error: GOOGLE_API_KEY is missing.", [], {}
+        yield "Error: GOOGLE_API_KEY is missing."
+        return
 
     try:
-        # 1. Search for relevant context
-        relevant_chunks = search_documents(user_query, user)
-        # Use select_related/prefetch_related if performance becomes an issue, but for now access property directly
+        relevant_chunks = search_documents(user_query, user, limit=3)
         context_str = "\n\n".join([f"Document: {c.document.title}\n{c.content}" for c in relevant_chunks])
+        if not context_str: context_str = "No relevant documents found."
         
-        if not context_str:
-            context_str = "No relevant documents found."
-
-        # 2. Construct System Instruction
         system_instruction = (
             "You are a helpful and intelligent assistant named 'Nexus'. "
             "You have access to the user's uploaded documents via the Context provided below. "
@@ -229,97 +344,32 @@ def generate_chat_response(message_history, user_query, user):
             "Do not include this line if you are just greeting."
         )
 
-        # 3. Format Chat History for Gemini
-        # Convert Django Message objects or dicts to Gemini content format
-        # Expecting message_history to be a list of dicts: [{'role': 'user'|'assistant', 'content': '...'}]
         contents = []
-        
-        # Add a system-like message at the start (Gemini supports system_instruction param in recent APIs, 
-        # but embedding it in the first turn or config is also common. 
-        # google-genai SDK 0.3+ has explicit config.
-        
         for msg in message_history:
             role = "user" if msg['role'] == "user" else "model"
-            contents.append(types.Content(
-                role=role,
-                parts=[types.Part.from_text(text=msg['content'])]
-            ))
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
 
-        # Add the current query with context as the last user message
         final_prompt = f"Context:\n{context_str}\n\nUser Question: {user_query}"
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)]))
         
-        contents.append(types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=final_prompt)]
-        ))
-        
-        # If the last message in history was the user query, replace it or append context to it.
-        # However, views.py usually saves the message first. 
-        # Let's assume message_history EXCLUDES the current new query, or we just append a new turn.
-        # Actually, simpler RAG pattern:
-        # System: Instructions
-        # User: <Context> + <Question>
-        # Model: <Answer>
-        
-        # Let's build a fresh request for this turn
-        response = client.models.generate_content(
-            model='gemini-3-flash-preview', # Using model requested by user
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-            ),
+        response_stream = client.models.generate_content_stream(
+            model='gemini-2.5-flash', 
+            config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.7),
             contents=contents
         )
-        
-        raw_text = response.text
-        
-        # Parse USED_SOURCES
-        final_text = raw_text
-        referenced_documents = []
-        
-        if "USED_SOURCES:" in raw_text:
-            parts = raw_text.rsplit("USED_SOURCES:", 1)
-            final_text = parts[0].strip()
-            sources_str = parts[1].strip()
-            
-            if sources_str != "NONE":
-                # Get all available docs from context
-                available_docs = {chunk.document.title: chunk.document for chunk in relevant_chunks}
-                
-                # Match titles
-                source_titles = [t.strip() for t in sources_str.split(',')]
-                for title in source_titles:
-                    # Simple fuzzy match or exact match
-                    # Trying exact match first since we told LLM to use exact titles
-                    if title in available_docs:
-                        referenced_documents.append(available_docs[title])
-                    else:
-                        # Fallback: check if title is contained in any available doc title
-                        for avail_title, doc in available_docs.items():
-                            if title.lower() in avail_title.lower():
-                                referenced_documents.append(doc)
-                                break
-            
-            # Remove duplicates
-            referenced_documents = list(set(referenced_documents))
-        else:
-            # Fallback for safe measure: if LLM ignored instruction, use old logic but maybe limit it?
-            # Or just return nothing to be strict. Let's return nothing to avoid "Sources" clutter.
-            referenced_documents = [] # list({chunk.document for chunk in relevant_chunks})
 
-        # Extract Usage Metadata
-        usage_data = {}
-        try:
-            if hasattr(response, 'usage_metadata'):
-                usage_data = {
-                    'input_tokens': response.usage_metadata.prompt_token_count,
-                    'output_tokens': response.usage_metadata.candidates_token_count,
-                    'total_tokens': response.usage_metadata.total_token_count
+        for chunk in response_stream:
+            if chunk.text:
+                yield chunk.text
+            if chunk.usage_metadata:
+                # Yield usage data as a dictionary
+                yield {
+                    "usage_metadata": {
+                        "input_tokens": chunk.usage_metadata.prompt_token_count,
+                        "output_tokens": chunk.usage_metadata.candidates_token_count,
+                        "total_tokens": chunk.usage_metadata.total_token_count
+                    }
                 }
-        except Exception as e:
-            print(f"Error extracting usage metadata: {e}")
 
-        return final_text, referenced_documents, usage_data
     except Exception as e:
-        print(f"Error generating response: {e}")
-        return "I encountered an error while processing your request. Please try again later.", [], {}
+        yield f"Error: {str(e)}"

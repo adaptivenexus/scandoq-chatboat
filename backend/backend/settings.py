@@ -20,6 +20,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / '.env')
 
+# LanceDB Configuration
+# Use S3 for persistence if available, otherwise explicit URI or local fallback
+_aws_bucket = os.getenv('AWS_STORAGE_BUCKET_NAME')
+if _aws_bucket:
+    LANCEDB_URI = os.getenv('LANCEDB_URI', f"s3://{_aws_bucket}/lancedb_index")
+else:
+    LANCEDB_URI = os.getenv('LANCEDB_URI', str(BASE_DIR / 'lancedb_data'))
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/

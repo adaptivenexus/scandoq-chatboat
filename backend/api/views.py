@@ -141,16 +141,17 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 total_tokens = usage_data.get('total_tokens', input_tokens + output_tokens)
                 
                 # Credit Calculation:
-                # Example Rate: 1 Credit = 1000 Tokens
+                # Example Rate: 1 Credit = 1000 Tokens (Standard)
                 cost = total_tokens / 1000.0
                 
                 # Update User Profile
-                if not hasattr(request.user, 'profile'):
-                    UserProfile.objects.create(user=request.user)
-                
-                profile = request.user.profile
+                # Force fetch to avoid caching issues
+                profile, _ = UserProfile.objects.get_or_create(user=request.user)
+                old_credits = profile.credits
                 profile.credits -= cost
                 profile.save()
+                
+                print(f"DEBUG: Usage {total_tokens} tokens. Cost {cost}. Credits {old_credits} -> {profile.credits}")
                 
                 # Log usage
                 UsageLog.objects.create(

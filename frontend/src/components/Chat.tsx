@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { endpoints } from "../config";
+import { endpoints, API_BASE_URL } from "../config";
 import DocumentPreview from "./DocumentPreview";
 
 interface Document {
@@ -532,17 +532,16 @@ export default function Chat() {
                                     key={doc.id}
                                     onClick={() => {
                                       // Handle relative paths from Django (which start with /media)
-                                      // Use hardcoded backend URL for now as API_BASE_URL has /api suffix
                                       const fileUrl = doc.file_url || (doc.file.startsWith("http")
                                         ? doc.file
-                                        : `http://127.0.0.1:8000${doc.file}`);
+                                        : `${API_BASE_URL.replace('/api', '')}${doc.file}`);
                                       setSelectedDocument(fileUrl);
                                       // Set the citation text for highlighting
                                       // Use the AI's response content to find the answer in the text
                                       const highlightSource = msg.content || "";
 
                                       // Smart Length Check: Don't highlight if the response is too long (like a summary)
-                                      // Threshold: 50 words
+                                      // Threshold: 50 words (Restored per user request to avoid yellow pages on summaries)
                                       const wordCount = highlightSource.split(/\s+/).length;
                                       if (wordCount > 50) {
                                         setSelectedCitation(""); // Clear/Don't highlight
@@ -555,16 +554,20 @@ export default function Chat() {
                                         'tell', 'me', 'about', 'what', 'where', 'who', 'when', 'how', 'the', 'a', 'an',
                                         'and', 'or', 'but', 'for', 'of', 'to', 'with', 'from', 'at', 'by', 'on', 'source', 'sources'
                                       ];
-                                      const keywords = highlightSource
+                                      const processedWords = highlightSource
                                         .toLowerCase()
+                                        .replace(/[.,;:!?()"']/g, " ") // Replace punctuation with space
                                         .split(/\s+/)
-                                        .map(word => word.replace(/[.,;:!?)]+$/, "").replace(/^[(]+/, "")) // Strip trailing/leading punctuation
+                                        .map(word => word.replace(/'s$/, "")) // Remove possessive 's
                                         .filter(word => {
                                           if (stopWords.includes(word)) return false;
-                                          if (word.length < 2) return false; // Filter very short words
-                                          return true; // Keep everything else including numbers/currency
-                                        })
-                                        .join(' ');
+                                          if (word.length < 4) return false;
+                                          return true;
+                                        });
+
+                                      // Configure unique keywords and limit to Top 10
+                                      const uniqueKeywords = [...new Set(processedWords)].slice(0, 10);
+                                      const keywords = uniqueKeywords.join(' ');
 
                                       setSelectedCitation(keywords);
                                     }}
@@ -708,6 +711,6 @@ export default function Chat() {
           </div>
         )}
       </div>
-    </div>
+    </div >
   );
 }
