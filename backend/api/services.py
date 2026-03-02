@@ -43,7 +43,9 @@ def get_embedding(text):
 def get_db():
     # Connect to LanceDB using the URI from settings
     # If S3, ensured by environment vars for credentials
-    return lancedb.connect(settings.LANCEDB_URI)
+    # Added getattr fallback in case 'LANCEDB_URI' is not in settings.py (e.g., outdated local file)
+    uri = getattr(settings, 'LANCEDB_URI', str(getattr(settings, 'BASE_DIR', '.')) + '/lancedb_data')
+    return lancedb.connect(uri)
 
 def process_document(document_id):
     print(f"Processing document ID: {document_id}")
